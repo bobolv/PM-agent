@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PM Agent</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">PM</span>
+        <span>PM Agent</span>
+      </div>
+      <nav class="side-nav">
+        <button id="navProjects" class="side-link active" type="button">项目列表</button>
+        <button id="navNewProject" class="side-link" type="button">新建项目</button>
+      </nav>
+      <div class="side-section">
+        <div class="side-title">当前项目</div>
+        <div id="projectList" class="project-list"></div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <h1 id="pageTitle">项目列表</h1>
+          <p id="pageSubtitle" class="muted">选择一个项目进入详情，或使用向导创建新项目。</p>
+        </div>
+        <div id="headerActions" class="actions"></div>
+      </header>
+
+      <section id="projectsPage" class="page active">
+        <div class="list-toolbar">
+          <div>
+            <h2>已建项目</h2>
+            <p class="muted">项目详情、阶段文档和生成记录从这里进入。</p>
+          </div>
+        </div>
+        <div id="projectCards" class="project-grid"></div>
+      </section>
+
+      <section id="wizardPage" class="page">
+        <div class="wizard">
+          <aside class="wizard-steps">
+            <button class="step active" data-step="1" type="button">
+              <span>1</span>
+              项目信息
+            </button>
+            <button class="step" data-step="2" type="button">
+              <span>2</span>
+              角色确认
+            </button>
+            <button class="step" data-step="3" type="button">
+              <span>3</span>
+              文档勾选
+            </button>
+          </aside>
+
+          <div class="wizard-body">
+            <div id="wizardStep1" class="wizard-panel active">
+              <h2>录入项目背景与需求材料</h2>
+              <div class="form-grid">
+                <label>
+                  项目名称
+                  <input id="projectName" placeholder="例如：智慧园区管理平台" />
+                </label>
+                <label>
+                  起始时间
+                  <input id="projectStart" type="date" />
+                </label>
+                <label>
+                  结束时间
+                  <input id="projectEnd" type="date" />
+                </label>
+                <label class="wide">
+                  项目背景
+                  <textarea id="projectBackground" rows="5" placeholder="描述业务背景、建设目标、现状问题和约束。"></textarea>
+                </label>
+                <label class="wide">
+                  需求材料
+                  <textarea id="projectRequirements" rows="7" placeholder="粘贴或概述初始需求、任务、范围、干系人诉求和非功能要求。"></textarea>
+                </label>
+                <label class="wide">
+                  初始任务
+                  <textarea id="projectTasks" rows="5" placeholder="每行一个任务。任务后续可作为工作记录和周期报告的组织维度。"></textarea>
+                </label>
+              </div>
+            </div>
+
+            <div id="wizardStep2" class="wizard-panel">
+              <h2>确认项目角色</h2>
+              <p class="muted">当前版本会自动创建标准角色，后续可扩展为可编辑的角色与人员映射。</p>
+              <div id="defaultRoleList" class="role-grid"></div>
+            </div>
+
+            <div id="wizardStep3" class="wizard-panel">
+              <div class="list-toolbar">
+                <div>
+                  <h2>选择本项目启用的文档</h2>
+                  <p class="muted">候选库可以很完整，本项目只启用需要生成和管理的文档。</p>
+                </div>
+                <div class="actions">
+                  <button id="selectDefaultDocs" class="secondary" type="button">恢复默认</button>
+                  <button id="selectAllDocs" class="secondary" type="button">全选</button>
+                </div>
+              </div>
+              <div id="catalogChecklist" class="catalog-groups"></div>
+            </div>
+
+            <div class="wizard-footer">
+              <button id="prevWizard" class="secondary" type="button">上一步</button>
+              <button id="nextWizard" class="primary" type="button">下一步</button>
+              <button id="submitProject" class="primary hidden" type="button">创建项目</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="projectDetailPage" class="page">
+        <div class="detail-grid">
+          <section class="detail-main">
+            <div class="section-head">
+              <div>
+                <h2 id="detailProjectName">项目详情</h2>
+                <p id="detailProjectMeta" class="muted"></p>
+              </div>
+              <button id="backToProjects" class="secondary" type="button">返回项目列表</button>
+            </div>
+            <div id="projectSummary" class="summary-grid"></div>
+            <div class="section-head">
+              <div>
+                <h2>生命周期阶段</h2>
+                <p class="muted">进入阶段后查看该阶段启用文档并生成。</p>
+              </div>
+            </div>
+            <div id="phaseCards" class="phase-grid"></div>
+            <div class="section-head secondary-section">
+              <div>
+                <h2>周期文档</h2>
+                <p class="muted">周报、月报等文档不归属单一阶段，生成时会优先引用周期工作记录。</p>
+              </div>
+            </div>
+            <div id="periodicPlans" class="document-plan-grid"></div>
+          </section>
+
+          <aside class="detail-side">
+            <div class="panel">
+              <h2>项目角色</h2>
+              <div id="projectRoles" class="list compact-list"></div>
+            </div>
+            <div class="panel">
+              <h2>最近文档</h2>
+              <div id="recentDocuments" class="list compact-list"></div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="phaseDetailPage" class="page">
+        <div class="section-head">
+          <div>
+            <button id="backToProjectDetail" class="link-button" type="button">返回项目详情</button>
+            <h2 id="phaseTitle">阶段详情</h2>
+            <p id="phaseDescription" class="muted"></p>
+          </div>
+        </div>
+        <div id="phaseDocumentPlans" class="document-plan-grid"></div>
+      </section>
+
+      <section id="previewPage" class="page">
+        <div class="section-head">
+          <div>
+            <button id="backToPhaseDetail" class="link-button" type="button">返回阶段详情</button>
+            <h2 id="previewTitle">文档生成预览</h2>
+            <p id="previewMeta" class="muted"></p>
+          </div>
+          <button id="generateFromPreview" class="generate" type="button">生成文档版本</button>
+        </div>
+        <div class="preview-layout">
+          <div class="panel">
+            <h2>生成 Prompt</h2>
+            <h3>System Prompt</h3>
+            <pre id="systemPrompt"></pre>
+            <h3>User Prompt</h3>
+            <pre id="userPrompt"></pre>
+          </div>
+          <div class="panel">
+            <h2>引用上下文</h2>
+            <div id="sourceBadges" class="badge-row"></div>
+            <pre id="contextPreview"></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
