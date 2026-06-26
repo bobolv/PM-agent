@@ -5,6 +5,54 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>PM Agent</title>
     <link rel="stylesheet" href="/static/styles.css" />
+    <style>
+      .file-open-warning {
+        max-width: 720px;
+        margin: 80px auto;
+        padding: 28px;
+        font-family:
+          Inter, "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont,
+          sans-serif;
+        color: #1f2933;
+        background: #ffffff;
+        border: 1px solid #dbe3ef;
+        border-radius: 10px;
+        box-shadow: 0 18px 45px rgb(15 23 42 / 8%);
+      }
+
+      .file-open-warning h1 {
+        margin: 0 0 12px;
+        font-size: 24px;
+      }
+
+      .file-open-warning p {
+        margin: 0 0 14px;
+        color: #64748b;
+        line-height: 1.7;
+      }
+
+      .file-open-warning code {
+        display: inline-block;
+        padding: 6px 9px;
+        color: #0f172a;
+        background: #f1f5f9;
+        border-radius: 6px;
+      }
+    </style>
+    <script>
+      if (window.location.protocol === "file:") {
+        document.addEventListener("DOMContentLoaded", () => {
+          document.body.innerHTML = `
+            <main class="file-open-warning">
+              <h1>请通过本地服务访问 PM Agent</h1>
+              <p>当前是直接打开 HTML 文件，页面样式、交互和 API 都不会正常加载。</p>
+              <p>请确认后端服务正在运行，然后访问：</p>
+              <p><code>http://127.0.0.1:8001</code></p>
+            </main>
+          `;
+        });
+      }
+    </script>
   </head>
   <body>
     <aside class="sidebar">
@@ -38,7 +86,7 @@
             <p class="muted">项目详情、阶段文档和生成记录从这里进入。</p>
           </div>
         </div>
-        <div id="projectCards" class="project-grid"></div>
+        <div id="projectCards"></div>
       </section>
 
       <section id="wizardPage" class="page">
@@ -131,18 +179,25 @@
             <div id="projectSummary" class="summary-grid"></div>
             <div class="section-head">
               <div>
+                <h2>项目文档清单</h2>
+                <p class="muted">按阶段、角色、状态和依赖关系管理全部启用文档。</p>
+              </div>
+            </div>
+            <div id="projectDocumentPlans"></div>
+            <div class="section-head">
+              <div>
                 <h2>生命周期阶段</h2>
                 <p class="muted">进入阶段后查看该阶段启用文档并生成。</p>
               </div>
             </div>
-            <div id="phaseCards" class="phase-grid"></div>
+            <div id="phaseCards"></div>
             <div class="section-head secondary-section">
               <div>
                 <h2>周期文档</h2>
                 <p class="muted">周报、月报等文档不归属单一阶段，生成时会优先引用周期工作记录。</p>
               </div>
             </div>
-            <div id="periodicPlans" class="document-plan-grid"></div>
+            <div id="periodicPlans"></div>
           </section>
 
           <aside class="detail-side">
@@ -153,6 +208,11 @@
             <div class="panel">
               <h2>最近文档</h2>
               <div id="recentDocuments" class="list compact-list"></div>
+            </div>
+            <div class="panel danger-zone">
+              <h2>项目设置</h2>
+              <p class="muted">删除项目属于不可恢复操作，建议只在确认项目不再需要时使用。</p>
+              <button id="deleteCurrentProject" class="danger" type="button">删除当前项目</button>
             </div>
           </aside>
         </div>
@@ -166,7 +226,36 @@
             <p id="phaseDescription" class="muted"></p>
           </div>
         </div>
-        <div id="phaseDocumentPlans" class="document-plan-grid"></div>
+        <div id="phaseDocumentPlans"></div>
+      </section>
+
+      <section id="referencePage" class="page">
+        <div class="section-head">
+          <div>
+            <button id="backFromReference" class="link-button" type="button">返回文档清单</button>
+            <h2>引用关系管理</h2>
+            <p id="referenceTargetMeta" class="muted"></p>
+          </div>
+        </div>
+        <div class="reference-target">
+          <span>当前文档</span>
+          <strong id="referenceTargetTitle">未选择文档</strong>
+        </div>
+        <div class="reference-layout">
+          <div class="panel">
+            <h2>已导入上下文的前序文档</h2>
+            <p class="muted">生成预览会按这里的清单拉取已生成版本，并自动去重。</p>
+            <div id="referenceList" class="reference-list"></div>
+          </div>
+          <div class="panel">
+            <h2>添加引用文档</h2>
+            <p class="muted">从本项目已启用文档中选择。未生成的文档可先建立关系，生成时若无版本会跳过。</p>
+            <div class="reference-add">
+              <select id="referenceCandidateSelect"></select>
+              <button id="addReference" class="primary" type="button">添加到上下文</button>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section id="previewPage" class="page">
@@ -178,6 +267,7 @@
           </div>
           <button id="generateFromPreview" class="generate" type="button">生成文档版本</button>
         </div>
+        <div id="generationStatus" class="generation-status"></div>
         <div class="preview-layout">
           <div class="panel">
             <h2>生成 Prompt</h2>
@@ -194,7 +284,8 @@
         </div>
       </section>
     </main>
+    <div id="toast" class="toast hidden" role="status"></div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260626-reference-fallback"></script>
   </body>
 </html>

@@ -114,6 +114,27 @@ class ProjectDocumentPlanRead(BaseModel):
     period_type: str | None
     sort_order: int
     dependency_codes: list[str]
+    dependency_plan_ids: list[int]
+
+
+class DocumentReferencePlanRead(BaseModel):
+    id: int
+    title: str
+    code: str
+    phase_id: int | None
+    phase_name: str | None
+    status: DocumentPlanStatus
+    is_periodic: bool
+
+
+class DocumentReferencesRead(BaseModel):
+    plan: DocumentReferencePlanRead
+    references: list[DocumentReferencePlanRead]
+    candidates: list[DocumentReferencePlanRead]
+
+
+class DocumentReferencesUpdate(BaseModel):
+    dependency_plan_ids: list[int] = Field(default_factory=list)
 
 
 class GenerateDocumentRequest(BaseModel):
@@ -134,6 +155,15 @@ class GenerationPreviewRead(BaseModel):
     source_document_ids: list[int]
     source_artifact_ids: list[int]
     source_work_record_ids: list[int]
+
+
+class RuntimeInfoRead(BaseModel):
+    llm_provider: str
+    llm_base_url: str
+    llm_model: str
+    llm_temperature: float
+    api_key_configured: bool
+    openai_configured: bool
 
 
 class DocumentRead(BaseModel):

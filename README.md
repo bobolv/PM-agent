@@ -73,13 +73,19 @@ Copy-Item .env.example .env
 uv run pm-agent-api
 ```
 
+访问前端页面：
+
+```text
+http://127.0.0.1:8000
+```
+
 访问 API 文档：
 
 ```text
 http://localhost:8000/docs
 ```
 
-前端是静态页面，可以用任意静态服务器打开 `frontend/index.html`；使用 Docker Compose 时会自动通过 Nginx 托管。
+不要直接双击打开 `frontend/index.html`，否则样式、交互和 API 请求都不会正常加载。使用 Docker Compose 时会自动通过 Nginx 托管。
 
 ## Docker 运行
 
@@ -98,13 +104,29 @@ docker compose up --build
 `.env` 中可以配置：
 
 ```text
+APP_PORT=8000
+LLM_PROVIDER=openai
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_MODEL=gpt-4.1-mini
 LLM_TEMPERATURE=0.2
 OPENAI_API_KEY=你的密钥
 ```
 
-如果使用其他 OpenAI 兼容服务，只需要替换 `LLM_BASE_URL` 和模型名称。
+如果使用火山引擎方舟豆包模型，可以改为：
+
+```text
+LLM_PROVIDER=volcengine
+LLM_TEMPERATURE=0.2
+VOLCENGINE_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+VOLCENGINE_MODEL=doubao-seed-2-1-pro-260628
+VOLCENGINE_API_KEY=你的火山引擎方舟 API Key
+```
+
+`LLM_PROVIDER=volcengine` 时，系统会默认使用上面的火山方舟地址和豆包模型；如需临时覆盖，也可以继续通过 `LLM_BASE_URL` 和 `LLM_MODEL` 指定 OpenAI 兼容地址和模型名称。
+
+修改 `.env` 后需要重启后端服务，新的模型地址和密钥才会生效。
+
+如果本机 `8000` 端口被旧进程占用，可以在 `.env` 中改成 `APP_PORT=8001`，然后访问 `http://127.0.0.1:8001`。
 
 ## 候选模板库
 

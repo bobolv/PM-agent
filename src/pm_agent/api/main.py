@@ -39,7 +39,9 @@ def create_app() -> FastAPI:
             CatalogService(session).seed_document_catalog()
             TemplateLibraryService(session, settings).generate_missing_templates()
 
-    app.include_router(router)
+    # Register routes explicitly so the static frontend and the API share one app
+    # even in environments where include_router is deferred as an internal route.
+    app.router.routes.extend(router.routes)
 
     frontend_dir = Path(__file__).resolve().parents[3] / "frontend"
     index_file = frontend_dir / "index.html"
@@ -57,4 +59,5 @@ app = create_app()
 
 
 def run() -> None:
-    uvicorn.run("pm_agent.api.main:app", host="0.0.0.0", port=8000, reload=True)
+    settings = get_settings()
+    uvicorn.run("pm_agent.api.main:app", host=settings.app_host, port=settings.app_port, reload=False)

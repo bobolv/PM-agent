@@ -124,6 +124,7 @@ class ProjectDocumentPlan(SQLModel, table=True):
     period_type: str | None = None
     sort_order: int = 0
     dependency_codes: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    dependency_plan_ids: list[int] = Field(default_factory=list, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

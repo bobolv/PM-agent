@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 
-from pm_agent.config import Settings
+from pm_agent.config import Settings, get_llm_api_key, get_llm_base_url, get_llm_model
 
 
 @dataclass(frozen=True)
@@ -16,33 +16,44 @@ class LLMClient:
         raise NotImplementedError
 
 
+class ModelInvocationError(RuntimeError):
+    pass
+
+
 class OpenAICompatibleClient(LLMClient):
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.api_key = get_llm_api_key(settings)
+        self.base_url = get_llm_base_url(settings)
+        self.model = get_llm_model(settings)
         self.client = OpenAI(
-            api_key=settings.openai_api_key or "missing-key",
-            base_url=settings.llm_base_url,
+            api_key=self.api_key or "missing-key",
+            base_url=self.base_url,
         )
 
     def generate(self, request: LLMRequest) -> str:
-        if not self.settings.openai_api_key:
-            return offline_markdown_response(request)
+        if not self.api_key:
+            return offline_markdown_response(request, self.settings.llm_provider)
 
-        response = self.client.chat.completions.create(
-            model=self.settings.llm_model,
-            temperature=self.settings.llm_temperature,
-            messages=[
-                {"role": "system", "content": request.system_prompt},
-                {"role": "user", "content": request.user_prompt},
-            ],
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                temperature=self.settings.llm_temperature,
+                messages=[
+                    {"role": "system", "content": request.system_prompt},
+                    {"role": "user", "content": request.user_prompt},
+                ],
+            )
+        except OpenAIError as exc:
+            raise ModelInvocationError(f"模型调用失败：{exc}") from exc
         return response.choices[0].message.content or ""
 
 
-def offline_markdown_response(request: LLMRequest) -> str:
+def offline_markdown_response(request: LLMRequest, provider: str = "openai") -> str:
+    key_name = "VOLCENGINE_API_KEY" if provider == "volcengine" else "OPENAI_API_KEY"
     return (
         "# 离线草稿\n\n"
-        "当前未配置 `OPENAI_API_KEY`，系统已根据提示词生成占位草稿。\n\n"
+        f"当前未配置 `{key_name}`，系统已根据提示词生成占位草稿。\n\n"
         "## 生成要求摘要\n\n"
         f"{request.user_prompt[:2000]}\n\n"
         "## 后续处理\n\n"

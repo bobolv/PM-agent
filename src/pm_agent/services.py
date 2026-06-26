@@ -155,6 +155,7 @@ class ProjectService:
         catalog_items = self.session.exec(
             select(DocumentCatalogItem).order_by(DocumentCatalogItem.sort_order)
         ).all()
+        created_plans: list[ProjectDocumentPlan] = []
         for item in catalog_items:
             enabled = item.default_selected if not selected_codes else item.code in selected_codes
             if not enabled:
@@ -162,22 +163,32 @@ class ProjectService:
 
             phase = phase_by_name.get(item.phase_name or "")
             role = role_by_type.get(item.default_role_type, role_by_type.get(RoleType.project_manager))
-            self.session.add(
-                ProjectDocumentPlan(
-                    project_id=project_id,
-                    phase_id=phase.id if phase else None,
-                    catalog_item_id=item.id or 0,
-                    role_id=role.id if role else None,
-                    code=item.code,
-                    title=item.name,
-                    description=item.description,
-                    outline_md=item.outline_md,
-                    is_periodic=item.is_periodic,
-                    period_type=item.period_type,
-                    sort_order=item.sort_order,
-                    dependency_codes=item.dependency_codes,
-                )
+            plan = ProjectDocumentPlan(
+                project_id=project_id,
+                phase_id=phase.id if phase else None,
+                catalog_item_id=item.id or 0,
+                role_id=role.id if role else None,
+                code=item.code,
+                title=item.name,
+                description=item.description,
+                outline_md=item.outline_md,
+                is_periodic=item.is_periodic,
+                period_type=item.period_type,
+                sort_order=item.sort_order,
+                dependency_codes=item.dependency_codes,
             )
+            self.session.add(plan)
+            created_plans.append(plan)
+
+        self.session.flush()
+        plan_by_code = {plan.code: plan for plan in created_plans}
+        for plan in created_plans:
+            plan.dependency_plan_ids = [
+                dependency.id
+                for code in plan.dependency_codes
+                if (dependency := plan_by_code.get(code)) is not None and dependency.id is not None
+            ]
+            self.session.add(plan)
 
     def ensure_roles_and_plans(self, project_id: int) -> None:
         project = self.session.get(Project, project_id)
@@ -334,14 +345,14 @@ class DocumentGenerationService:
             if plan is None:
                 raise ValueError("Document plan not found")
             project = self._get_project(plan.project_id)
-            document = ProjectDocument(
+            document = self._get_existing_document(project.id, plan_id=plan.id) or ProjectDocument(
                 project_id=project.id,
                 phase_id=plan.phase_id,
                 plan_id=plan.id,
                 title=plan.title,
-                status=DocumentStatus.generated,
-                source_document_ids=preview.source_document_ids,
             )
+            document.phase_id = plan.phase_id
+            document.title = plan.title
             plan.status = DocumentPlanStatus.generated
             plan.updated_at = datetime.utcnow()
             self.session.add(plan)
@@ -350,29 +361,34 @@ class DocumentGenerationService:
             if template is None:
                 raise ValueError("Document template not found")
             project = self._get_project(template.project_id)
-            document = ProjectDocument(
+            document = self._get_existing_document(
+                project.id,
+                template_id=template.id,
+            ) or ProjectDocument(
                 project_id=project.id,
                 phase_id=template.phase_id,
                 template_id=template.id,
                 title=template.name,
-                status=DocumentStatus.generated,
-                source_document_ids=preview.source_document_ids,
             )
+            document.phase_id = template.phase_id
+            document.title = template.name
 
         content = self.llm.generate(
             LLMRequest(system_prompt=preview.system_prompt, user_prompt=preview.user_prompt)
         )
         document.content_md = content
-        self.session.add(document)
-        self.session.commit()
-        self.session.refresh(document)
-
-        document.file_path = self._write_document(project, document)
+        document.status = DocumentStatus.generated
+        document.source_document_ids = preview.source_document_ids
         document.updated_at = datetime.utcnow()
         self.session.add(document)
         self.session.flush()
+        self.session.refresh(document)
 
-        self._create_document_version(document, content, preview, "首次生成")
+        document.file_path = self._write_document(project, document)
+        self.session.add(document)
+        self.session.flush()
+
+        self._create_document_version(document, content, preview, "生成文档版本")
         self.session.add(
             DocumentGenerationRun(
                 project_id=project.id,
@@ -390,6 +406,22 @@ class DocumentGenerationService:
         self.session.commit()
         self.session.refresh(document)
         return document
+
+    def _get_existing_document(
+        self,
+        project_id: int,
+        *,
+        plan_id: int | None = None,
+        template_id: int | None = None,
+    ) -> ProjectDocument | None:
+        statement = select(ProjectDocument).where(ProjectDocument.project_id == project_id)
+        if plan_id is not None:
+            statement = statement.where(ProjectDocument.plan_id == plan_id)
+        elif template_id is not None:
+            statement = statement.where(ProjectDocument.template_id == template_id)
+        else:
+            return None
+        return self.session.exec(statement.order_by(ProjectDocument.id.desc())).first()
 
     def _preview_plan(self, plan_id: int, extra_instruction: str) -> GenerationPreview:
         plan = self.session.get(ProjectDocumentPlan, plan_id)
@@ -467,9 +499,13 @@ class DocumentGenerationService:
     def _select_context_documents_for_plan(self, plan: ProjectDocumentPlan) -> list[ProjectDocument]:
         statement = select(ProjectDocument).where(ProjectDocument.project_id == plan.project_id)
         if plan.is_periodic:
-            return list(self.session.exec(statement.order_by(ProjectDocument.updated_at.desc())).all()[:6])
+            return self._dedupe_documents(
+                list(self.session.exec(statement.order_by(ProjectDocument.updated_at.desc())).all())[:6]
+            )
 
-        dependency_docs = self._documents_by_dependency_codes(plan)
+        dependency_docs = self._dedupe_documents(
+            self._documents_by_dependency_plan_ids(plan) + self._documents_by_dependency_codes(plan)
+        )
         if dependency_docs:
             return dependency_docs
 
@@ -488,13 +524,18 @@ class DocumentGenerationService:
         ).all()
         if not previous_phase_ids:
             return []
-        return list(
-            self.session.exec(
-                statement.where(col(ProjectDocument.phase_id).in_(previous_phase_ids)).order_by(
-                    ProjectDocument.updated_at.desc()
-                )
-            ).all()[:6]
+        return self._dedupe_documents(
+            list(
+                self.session.exec(
+                    statement.where(col(ProjectDocument.phase_id).in_(previous_phase_ids)).order_by(
+                        ProjectDocument.updated_at.desc()
+                    )
+                ).all()[:6]
+            )
         )
+
+    def _documents_by_dependency_plan_ids(self, plan: ProjectDocumentPlan) -> list[ProjectDocument]:
+        return self._latest_documents_for_plan_ids(plan.dependency_plan_ids or [])
 
     def _documents_by_dependency_codes(self, plan: ProjectDocumentPlan) -> list[ProjectDocument]:
         if not plan.dependency_codes:
@@ -509,13 +550,46 @@ class DocumentGenerationService:
         dependency_plan_ids = [item.id for item in dependency_plans if item.id is not None]
         if not dependency_plan_ids:
             return []
-        return list(
-            self.session.exec(
-                select(ProjectDocument)
-                .where(col(ProjectDocument.plan_id).in_(dependency_plan_ids))
-                .order_by(ProjectDocument.updated_at.desc())
-            ).all()
-        )
+        return self._latest_documents_for_plan_ids(dependency_plan_ids)
+
+    def _latest_documents_for_plan_ids(self, plan_ids: list[int]) -> list[ProjectDocument]:
+        if not plan_ids:
+            return []
+        documents = self.session.exec(
+            select(ProjectDocument)
+            .where(col(ProjectDocument.plan_id).in_(plan_ids))
+            .order_by(ProjectDocument.updated_at.desc(), ProjectDocument.id.desc())
+        ).all()
+        seen_plan_ids: set[int] = set()
+        latest_documents: list[ProjectDocument] = []
+        for document in documents:
+            if document.plan_id is None or document.plan_id in seen_plan_ids:
+                continue
+            seen_plan_ids.add(document.plan_id)
+            latest_documents.append(document)
+        return latest_documents
+
+    def _dedupe_documents(self, documents: list[ProjectDocument]) -> list[ProjectDocument]:
+        seen_document_ids: set[int] = set()
+        seen_plan_ids: set[int] = set()
+        seen_titles: set[tuple[int, str]] = set()
+        result: list[ProjectDocument] = []
+        for document in documents:
+            if document.id is not None and document.id in seen_document_ids:
+                continue
+            if document.plan_id is not None:
+                if document.plan_id in seen_plan_ids:
+                    continue
+                seen_plan_ids.add(document.plan_id)
+            title_key = (document.phase_id or 0, document.title.strip())
+            if document.title and title_key in seen_titles:
+                continue
+            if document.id is not None:
+                seen_document_ids.add(document.id)
+            if document.title:
+                seen_titles.add(title_key)
+            result.append(document)
+        return result
 
     def _select_work_records_for_plan(self, plan: ProjectDocumentPlan) -> list[WorkRecord]:
         statement = select(WorkRecord).where(WorkRecord.project_id == plan.project_id)
@@ -552,7 +626,9 @@ class DocumentGenerationService:
     def _select_context_documents_for_template(self, template: DocumentTemplate) -> list[ProjectDocument]:
         statement = select(ProjectDocument).where(ProjectDocument.project_id == template.project_id)
         if template.is_periodic:
-            return list(self.session.exec(statement.order_by(ProjectDocument.updated_at.desc())).all()[:6])
+            return self._dedupe_documents(
+                list(self.session.exec(statement.order_by(ProjectDocument.updated_at.desc())).all())[:6]
+            )
         if template.phase_id is None:
             return []
         phase = self.session.get(LifecyclePhase, template.phase_id)
@@ -568,12 +644,14 @@ class DocumentGenerationService:
         ).all()
         if not previous_phase_ids:
             return []
-        return list(
-            self.session.exec(
-                statement.where(col(ProjectDocument.phase_id).in_(previous_phase_ids)).order_by(
-                    ProjectDocument.updated_at.desc()
-                )
-            ).all()[:6]
+        return self._dedupe_documents(
+            list(
+                self.session.exec(
+                    statement.where(col(ProjectDocument.phase_id).in_(previous_phase_ids)).order_by(
+                        ProjectDocument.updated_at.desc()
+                    )
+                ).all()[:6]
+            )
         )
 
     def _select_legacy_artifacts_for_template(self, template: DocumentTemplate) -> list[TaskArtifact]:
@@ -643,7 +721,7 @@ class DocumentGenerationService:
             f"{role.name}：{role.responsibility}" if role else "项目经理：负责组织项目交付物。"
         )
         phase_block = f"{phase.name}：{phase.description}" if phase else "周期性项目管理文档"
-        dependencies = ", ".join(plan.dependency_codes) if plan.dependency_codes else "无显式依赖"
+        dependencies = self._dependency_summary(plan)
         return f"""
 请生成文档：{plan.title}
 
@@ -660,7 +738,7 @@ class DocumentGenerationService:
 {plan.outline_md}
 
 依赖文档策略：
-优先引用以下文档代码对应的已生成版本：{dependencies}。
+优先导入并引用以下前序文档的已生成版本：{dependencies}。
 如果依赖文档不存在，只能使用当前阶段信息、必要项目摘要和已提供上下文，不得强行补全事实。
 
 已选择的上下文材料：
@@ -669,6 +747,36 @@ class DocumentGenerationService:
 额外要求：
 {extra_instruction or "无"}
 """.strip()
+
+    def _dependency_summary(self, plan: ProjectDocumentPlan) -> str:
+        dependency_plan_ids = list(plan.dependency_plan_ids or [])
+        if not dependency_plan_ids and plan.dependency_codes:
+            dependency_plan_ids = [
+                item.id
+                for item in self.session.exec(
+                    select(ProjectDocumentPlan).where(
+                        ProjectDocumentPlan.project_id == plan.project_id,
+                        col(ProjectDocumentPlan.code).in_(plan.dependency_codes),
+                    )
+                ).all()
+                if item.id is not None
+            ]
+        if not dependency_plan_ids:
+            return "无显式依赖"
+
+        plans = self.session.exec(
+            select(ProjectDocumentPlan)
+            .where(col(ProjectDocumentPlan.id).in_(dependency_plan_ids))
+            .order_by(ProjectDocumentPlan.sort_order)
+        ).all()
+        seen: set[int] = set()
+        names: list[str] = []
+        for dependency in plans:
+            if dependency.id is None or dependency.id in seen:
+                continue
+            seen.add(dependency.id)
+            names.append(dependency.title)
+        return "、".join(names) if names else "无显式依赖"
 
     def _build_template_prompt(
         self,

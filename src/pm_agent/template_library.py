@@ -135,7 +135,7 @@ class TemplateLibraryService:
 
     def _path_for_item(self, item: DocumentCatalogItem) -> Path:
         folder = item.phase_name or ("周期文档" if item.is_periodic else "未分组")
-        filename = f"{item.sort_order:04d}-{item.code}.md"
+        filename = f"{item.sort_order:04d}-{sanitize_path_part(item.name)}.md"
         return self.root / sanitize_path_part(folder) / filename
 
     def _render_template_file(self, item: DocumentCatalogItem) -> str:

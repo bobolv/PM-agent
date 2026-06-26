@@ -3,6 +3,9 @@ from sqlmodel import Session, select
 
 from pm_agent.api.schemas import (
     CatalogItemRead,
+    DocumentReferencePlanRead,
+    DocumentReferencesRead,
+    DocumentReferencesUpdate,
     DocumentRead,
     DocumentVersionRead,
     GenerateDocumentRequest,
@@ -14,6 +17,7 @@ from pm_agent.api.schemas import (
     ReportingWindowCreate,
     ReportingWindowRead,
     RoleRead,
+    RuntimeInfoRead,
     TaskArtifactCreate,
     TaskArtifactRead,
     TaskCreate,
@@ -24,8 +28,9 @@ from pm_agent.api.schemas import (
     WorkRecordRead,
 )
 from pm_agent.config import get_settings
+from pm_agent.config.settings import get_llm_api_key, get_llm_base_url, get_llm_model
 from pm_agent.db import get_session
-from pm_agent.llm import OpenAICompatibleClient
+from pm_agent.llm import ModelInvocationError, OpenAICompatibleClient
 from pm_agent.models import (
     DocumentCatalogItem,
     DocumentTemplate,
@@ -49,6 +54,20 @@ router = APIRouter(prefix="/api")
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/runtime", response_model=RuntimeInfoRead)
+def runtime_info() -> RuntimeInfoRead:
+    settings = get_settings()
+    api_key_configured = bool(get_llm_api_key(settings))
+    return RuntimeInfoRead(
+        llm_provider=settings.llm_provider,
+        llm_base_url=get_llm_base_url(settings),
+        llm_model=get_llm_model(settings),
+        llm_temperature=settings.llm_temperature,
+        api_key_configured=api_key_configured,
+        openai_configured=api_key_configured,
+    )
 
 
 @router.post("/projects", response_model=ProjectRead)
@@ -173,13 +192,15 @@ def list_document_plans(
     session: Session = Depends(get_session),
 ) -> list[ProjectDocumentPlan]:
     ProjectService(session).ensure_roles_and_plans(project_id)
-    return list(
+    plans = list(
         session.exec(
             select(ProjectDocumentPlan)
             .where(ProjectDocumentPlan.project_id == project_id, ProjectDocumentPlan.is_enabled)
             .order_by(ProjectDocumentPlan.is_periodic, ProjectDocumentPlan.sort_order)
         ).all()
     )
+    _normalize_plan_reference_fields(plans)
+    return plans
 
 
 @router.get(
@@ -192,7 +213,7 @@ def list_phase_document_plans(
     session: Session = Depends(get_session),
 ) -> list[ProjectDocumentPlan]:
     ProjectService(session).ensure_roles_and_plans(project_id)
-    return list(
+    plans = list(
         session.exec(
             select(ProjectDocumentPlan)
             .where(
@@ -203,6 +224,115 @@ def list_phase_document_plans(
             .order_by(ProjectDocumentPlan.sort_order)
         ).all()
     )
+    _normalize_plan_reference_fields(plans)
+    return plans
+
+
+def _reference_plan_read(
+    plan: ProjectDocumentPlan,
+    phase_by_id: dict[int, LifecyclePhase],
+) -> DocumentReferencePlanRead:
+    return DocumentReferencePlanRead(
+        id=plan.id or 0,
+        title=plan.title,
+        code=plan.code,
+        phase_id=plan.phase_id,
+        phase_name=phase_by_id[plan.phase_id].name if plan.phase_id in phase_by_id else None,
+        status=plan.status,
+        is_periodic=plan.is_periodic,
+    )
+
+
+@router.get("/document-plans/{plan_id}/references", response_model=DocumentReferencesRead)
+def get_document_plan_references(
+    plan_id: int,
+    session: Session = Depends(get_session),
+) -> DocumentReferencesRead:
+    plan = session.get(ProjectDocumentPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Document plan not found")
+
+    ProjectService(session).ensure_roles_and_plans(plan.project_id)
+    phases = session.exec(
+        select(LifecyclePhase).where(LifecyclePhase.project_id == plan.project_id)
+    ).all()
+    phase_by_id = {phase.id: phase for phase in phases if phase.id is not None}
+    project_plans = session.exec(
+        select(ProjectDocumentPlan)
+        .where(ProjectDocumentPlan.project_id == plan.project_id, ProjectDocumentPlan.is_enabled)
+        .order_by(ProjectDocumentPlan.is_periodic, ProjectDocumentPlan.sort_order)
+    ).all()
+    plan_by_code = {item.code: item for item in project_plans}
+    reference_ids = _normalize_reference_plan_ids(
+        plan,
+        project_plans,
+        [plan_by_code[code].id for code in plan.dependency_codes if code in plan_by_code],
+        include_existing=True,
+    )
+    if reference_ids != (plan.dependency_plan_ids or []):
+        plan_by_id = {item.id: item for item in project_plans if item.id is not None}
+        plan.dependency_plan_ids = reference_ids
+        plan.dependency_codes = [
+            plan_by_id[item_id].code for item_id in reference_ids if item_id in plan_by_id
+        ]
+        session.add(plan)
+        session.commit()
+        session.refresh(plan)
+    reference_set = set(reference_ids)
+    references = [item for item in project_plans if item.id in reference_set]
+    candidates = [item for item in project_plans if item.id != plan.id]
+    return DocumentReferencesRead(
+        plan=_reference_plan_read(plan, phase_by_id),
+        references=[_reference_plan_read(item, phase_by_id) for item in references],
+        candidates=[_reference_plan_read(item, phase_by_id) for item in candidates],
+    )
+
+
+@router.put("/document-plans/{plan_id}/references", response_model=DocumentReferencesRead)
+def update_document_plan_references(
+    plan_id: int,
+    payload: DocumentReferencesUpdate,
+    session: Session = Depends(get_session),
+) -> DocumentReferencesRead:
+    plan = session.get(ProjectDocumentPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Document plan not found")
+
+    project_plans = session.exec(
+        select(ProjectDocumentPlan)
+        .where(ProjectDocumentPlan.project_id == plan.project_id, ProjectDocumentPlan.is_enabled)
+        .order_by(ProjectDocumentPlan.is_periodic, ProjectDocumentPlan.sort_order)
+    ).all()
+    valid_ids = _normalize_reference_plan_ids(plan, project_plans, payload.dependency_plan_ids)
+    plan_by_id = {item.id: item for item in project_plans if item.id is not None}
+    plan.dependency_plan_ids = valid_ids
+    plan.dependency_codes = [plan_by_id[item_id].code for item_id in valid_ids if item_id in plan_by_id]
+    session.add(plan)
+    session.commit()
+    session.refresh(plan)
+    return get_document_plan_references(plan_id, session)
+
+
+def _normalize_reference_plan_ids(
+    plan: ProjectDocumentPlan,
+    project_plans: list[ProjectDocumentPlan],
+    requested_ids: list[int | None],
+    *,
+    include_existing: bool = False,
+) -> list[int]:
+    valid_ids = {item.id for item in project_plans if item.id is not None and item.id != plan.id}
+    normalized: list[int] = []
+    source_ids = [*(plan.dependency_plan_ids or []), *requested_ids] if include_existing else requested_ids
+    for requested_id in source_ids:
+        if requested_id in valid_ids and requested_id not in normalized:
+            normalized.append(int(requested_id))
+    return normalized
+
+
+def _normalize_plan_reference_fields(plans: list[ProjectDocumentPlan]) -> None:
+    for plan in plans:
+        plan.dependency_plan_ids = plan.dependency_plan_ids or []
+        plan.dependency_codes = plan.dependency_codes or []
 
 
 @router.post("/templates", response_model=TemplateRead)
@@ -230,13 +360,31 @@ def list_templates(project_id: int, session: Session = Depends(get_session)) -> 
 
 @router.get("/projects/{project_id}/documents", response_model=list[DocumentRead])
 def list_documents(project_id: int, session: Session = Depends(get_session)) -> list[ProjectDocument]:
-    return list(
+    documents = list(
         session.exec(
             select(ProjectDocument)
             .where(ProjectDocument.project_id == project_id)
-            .order_by(ProjectDocument.updated_at.desc())
+            .order_by(ProjectDocument.updated_at.desc(), ProjectDocument.id.desc())
         ).all()
     )
+    return _dedupe_project_documents(documents)
+
+
+def _dedupe_project_documents(documents: list[ProjectDocument]) -> list[ProjectDocument]:
+    seen: set[tuple[object, ...]] = set()
+    result: list[ProjectDocument] = []
+    for document in documents:
+        if document.plan_id is not None:
+            key = ("plan", document.plan_id)
+        elif document.template_id is not None:
+            key = ("template", document.template_id)
+        else:
+            key = ("title", document.phase_id, document.title)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(document)
+    return result
 
 
 @router.get("/documents/{document_id}/versions", response_model=list[DocumentVersionRead])
@@ -372,3 +520,7 @@ def generate_document(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ModelInvocationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"文档生成失败：{exc}") from exc
