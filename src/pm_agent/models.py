@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from enum import StrEnum
 
-from sqlalchemy import Column, JSON
+from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
 
@@ -125,6 +125,7 @@ class ProjectDocumentPlan(SQLModel, table=True):
     sort_order: int = 0
     dependency_codes: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     dependency_plan_ids: list[int] = Field(default_factory=list, sa_column=Column(JSON))
+    reference_document_ids: list[int] = Field(default_factory=list, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

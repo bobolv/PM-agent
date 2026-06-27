@@ -63,6 +63,7 @@
       <nav class="side-nav">
         <button id="navProjects" class="side-link active" type="button">项目列表</button>
         <button id="navNewProject" class="side-link" type="button">新建项目</button>
+        <button id="navSettings" class="side-link" type="button">全局设置</button>
       </nav>
       <div class="side-section">
         <div class="side-title">当前项目</div>
@@ -87,6 +88,29 @@
           </div>
         </div>
         <div id="projectCards"></div>
+      </section>
+
+      <section id="settingsPage" class="page">
+        <div class="settings-layout">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <h2>模板库管理</h2>
+                <p class="muted">模板库目录默认为 <code>template-library</code>。可用 Obsidian 编辑 Markdown 文件和 <code>[[关联]]</code>，再批量同步回程序。</p>
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="exportTemplates" class="primary" type="button">导出缺失模板</button>
+              <button id="exportTemplatesOverwrite" class="secondary" type="button">覆盖导出全部模板</button>
+              <button id="syncTemplates" class="primary" type="button">批量导入/同步模板</button>
+              <button id="resetBuiltinTemplates" class="secondary" type="button">重置内置模板并导出</button>
+            </div>
+            <div id="templateLibraryStatus" class="status-card template-status">
+              <strong>待操作</strong>
+              <span>导出会写入本地模板库目录；批量导入会扫描目录下所有 Markdown 模板。</span>
+            </div>
+          </section>
+        </div>
       </section>
 
       <section id="wizardPage" class="page">
@@ -209,6 +233,30 @@
               <h2>最近文档</h2>
               <div id="recentDocuments" class="list compact-list"></div>
             </div>
+            <div class="panel import-panel">
+              <h2>导入 MD 文档</h2>
+              <label>
+                选择文件
+                <input id="importMdFile" type="file" accept=".md,text/markdown,text/plain" />
+              </label>
+              <label>
+                所处阶段
+                <select id="importMdPhase"></select>
+              </label>
+              <label>
+                模板名称
+                <input id="importMdName" placeholder="默认使用文档一级标题或文件名" />
+              </label>
+              <label class="inline-check">
+                <input id="importAsDocument" type="checkbox" checked />
+                <span>作为当前项目关联文件</span>
+              </label>
+              <label class="inline-check">
+                <input id="importAsTemplate" type="checkbox" checked />
+                <span>提取提纲并编号入模板库</span>
+              </label>
+              <button id="importMdSubmit" class="primary" type="button">导入文档</button>
+            </div>
             <div class="panel danger-zone">
               <h2>项目设置</h2>
               <p class="muted">删除项目属于不可恢复操作，建议只在确认项目不再需要时使用。</p>
@@ -246,6 +294,8 @@
             <h2>已导入上下文的前序文档</h2>
             <p class="muted">生成预览会按这里的清单拉取已生成版本，并自动去重。</p>
             <div id="referenceList" class="reference-list"></div>
+            <h2 class="subsection-title">已导入的关联文件</h2>
+            <div id="referenceDocumentList" class="reference-list"></div>
           </div>
           <div class="panel">
             <h2>添加引用文档</h2>
@@ -253,6 +303,11 @@
             <div class="reference-add">
               <select id="referenceCandidateSelect"></select>
               <button id="addReference" class="primary" type="button">添加到上下文</button>
+            </div>
+            <h2 class="subsection-title">添加关联文件</h2>
+            <div class="reference-add">
+              <select id="referenceDocumentCandidateSelect"></select>
+              <button id="addDocumentReference" class="primary" type="button">添加关联文件</button>
             </div>
           </div>
         </div>
@@ -286,6 +341,6 @@
     </main>
     <div id="toast" class="toast hidden" role="status"></div>
 
-    <script src="/static/app.js?v=20260626-reference-fallback"></script>
+    <script src="/static/app.js?v=20260627-template-settings"></script>
   </body>
 </html>

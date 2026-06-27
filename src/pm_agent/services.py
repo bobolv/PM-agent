@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ from pm_agent.models import (
     TaskArtifact,
     WorkRecord,
 )
+from pm_agent.template_library import TemplateLibraryService, sanitize_path_part
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,39 @@ class GenerationPreview:
     source_document_ids: list[int]
     source_artifact_ids: list[int]
     source_work_record_ids: list[int]
+
+
+@dataclass(frozen=True)
+class MarkdownImportResult:
+    document: ProjectDocument | None
+    catalog_item: DocumentCatalogItem | None
+
+
+def extract_markdown_outline(content_md: str, fallback_title: str) -> str:
+    headings: list[tuple[int, str]] = []
+    for line in content_md.splitlines():
+        match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line.strip())
+        if not match:
+            continue
+        text = match.group(2).strip().strip("#").strip()
+        if text:
+            headings.append((len(match.group(1)), text))
+
+    if not headings:
+        return f"# {fallback_title}\n\n## 内容要点\n"
+
+    normalized: list[str] = []
+    has_h1 = any(level == 1 for level, _ in headings)
+    if not has_h1:
+        normalized.append(f"# {fallback_title}")
+    for level, text in headings:
+        normalized.append(f"{'#' * min(level, 6)} {text}")
+    return "\n\n".join(normalized).strip() + "\n"
+
+
+def ascii_slug(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.lower()).strip("-")
+    return re.sub(r"-+", "-", slug)
 
 
 class CatalogService:
@@ -314,6 +349,145 @@ class ProjectService:
                 )
 
 
+class MarkdownImportService:
+    def __init__(self, session: Session, settings: Settings) -> None:
+        self.session = session
+        self.settings = settings
+
+    def import_markdown(
+        self,
+        *,
+        project_id: int,
+        filename: str,
+        content_md: str,
+        phase_id: int | None,
+        import_as_template: bool = True,
+        import_as_reference_document: bool = True,
+        template_name: str | None = None,
+        description: str = "",
+    ) -> MarkdownImportResult:
+        project = self.session.get(Project, project_id)
+        if project is None or project.id is None:
+            raise ValueError("Project not found")
+
+        phase = self._get_phase(project_id, phase_id)
+        title = (template_name or self._title_from_markdown(filename, content_md)).strip()
+        if not title:
+            raise ValueError("Document title is required")
+        if not content_md.strip():
+            raise ValueError("Markdown content is required")
+
+        document = None
+        if import_as_reference_document:
+            document = ProjectDocument(
+                project_id=project.id,
+                phase_id=phase.id if phase else None,
+                title=title,
+                status=DocumentStatus.approved,
+                content_md=content_md.strip(),
+            )
+            self.session.add(document)
+            self.session.flush()
+            self.session.refresh(document)
+            document.file_path = self._write_imported_document(project, document, filename)
+            self.session.add(document)
+
+        catalog_item = None
+        if import_as_template:
+            catalog_item = self._create_catalog_item(
+                title=title,
+                phase=phase,
+                outline_md=extract_markdown_outline(content_md, fallback_title=title),
+                description=description or f"Imported from {filename}",
+            )
+            self.session.add(catalog_item)
+            self.session.flush()
+            TemplateLibraryService(self.session, self.settings).export_catalog_to_markdown(
+                overwrite=False
+            )
+
+        self.session.commit()
+        if document is not None:
+            self.session.refresh(document)
+        if catalog_item is not None:
+            self.session.refresh(catalog_item)
+        return MarkdownImportResult(document=document, catalog_item=catalog_item)
+
+    def _get_phase(self, project_id: int, phase_id: int | None) -> LifecyclePhase | None:
+        if phase_id is None:
+            return None
+        phase = self.session.get(LifecyclePhase, phase_id)
+        if phase is None or phase.project_id != project_id:
+            raise ValueError("Lifecycle phase not found")
+        return phase
+
+    def _create_catalog_item(
+        self,
+        *,
+        title: str,
+        phase: LifecyclePhase | None,
+        outline_md: str,
+        description: str,
+    ) -> DocumentCatalogItem:
+        sort_order = self._next_sort_order(phase)
+        code = self._unique_code(title, sort_order)
+        return DocumentCatalogItem(
+            code=code,
+            phase_name=phase.name if phase else None,
+            name=title,
+            description=description,
+            outline_md=outline_md,
+            default_role_type=RoleType.project_manager,
+            default_selected=False,
+            sort_order=sort_order,
+        )
+
+    def _next_sort_order(self, phase: LifecyclePhase | None) -> int:
+        statement = select(DocumentCatalogItem)
+        if phase is None:
+            statement = statement.where(DocumentCatalogItem.is_periodic)
+            base = 1000
+        else:
+            statement = statement.where(DocumentCatalogItem.phase_name == phase.name)
+            base = phase.order_index * 100
+        items = self.session.exec(statement.order_by(DocumentCatalogItem.sort_order.desc())).all()
+        current_max = items[0].sort_order if items else base
+        return max(base, current_max) + 1
+
+    def _unique_code(self, title: str, sort_order: int) -> str:
+        base = ascii_slug(title) or "markdown"
+        prefix = f"imported-{sort_order}-{base}"[:80].strip("-")
+        code = prefix
+        index = 2
+        existing_codes = set(self.session.exec(select(DocumentCatalogItem.code)).all())
+        while code in existing_codes:
+            code = f"{prefix}-{index}"
+            index += 1
+        return code
+
+    def _title_from_markdown(self, filename: str, content_md: str) -> str:
+        for line in content_md.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("# "):
+                return stripped[2:].strip()
+        return Path(filename).stem
+
+    def _write_imported_document(
+        self,
+        project: Project,
+        document: ProjectDocument,
+        filename: str,
+    ) -> str:
+        root = Path(self.settings.document_storage_path)
+        project_dir = root / f"project-{project.id}" / "imports"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(filename).suffix or ".md"
+        filename_part = sanitize_path_part(document.title)
+        path = project_dir / f"{document.id}-{filename_part}{suffix}"
+        path.write_text(render_project_document_file(document, []), encoding="utf-8")
+        return str(path)
+
+
 class DocumentGenerationService:
     def __init__(self, session: Session, settings: Settings, llm: LLMClient) -> None:
         self.session = session
@@ -498,13 +672,17 @@ class DocumentGenerationService:
 
     def _select_context_documents_for_plan(self, plan: ProjectDocumentPlan) -> list[ProjectDocument]:
         statement = select(ProjectDocument).where(ProjectDocument.project_id == plan.project_id)
+        explicit_docs = self._documents_by_reference_ids(plan)
         if plan.is_periodic:
             return self._dedupe_documents(
-                list(self.session.exec(statement.order_by(ProjectDocument.updated_at.desc())).all())[:6]
+                explicit_docs
+                + list(self.session.exec(statement.order_by(ProjectDocument.updated_at.desc())).all())[:6]
             )
 
         dependency_docs = self._dedupe_documents(
-            self._documents_by_dependency_plan_ids(plan) + self._documents_by_dependency_codes(plan)
+            explicit_docs
+            + self._documents_by_dependency_plan_ids(plan)
+            + self._documents_by_dependency_codes(plan)
         )
         if dependency_docs:
             return dependency_docs
@@ -536,6 +714,21 @@ class DocumentGenerationService:
 
     def _documents_by_dependency_plan_ids(self, plan: ProjectDocumentPlan) -> list[ProjectDocument]:
         return self._latest_documents_for_plan_ids(plan.dependency_plan_ids or [])
+
+    def _documents_by_reference_ids(self, plan: ProjectDocumentPlan) -> list[ProjectDocument]:
+        reference_ids = plan.reference_document_ids or []
+        if not reference_ids:
+            return []
+        return list(
+            self.session.exec(
+                select(ProjectDocument)
+                .where(
+                    ProjectDocument.project_id == plan.project_id,
+                    col(ProjectDocument.id).in_(reference_ids),
+                )
+                .order_by(ProjectDocument.updated_at.desc(), ProjectDocument.id.desc())
+            ).all()
+        )
 
     def _documents_by_dependency_codes(self, plan: ProjectDocumentPlan) -> list[ProjectDocument]:
         if not plan.dependency_codes:
@@ -860,5 +1053,63 @@ class DocumentGenerationService:
         project_dir.mkdir(parents=True, exist_ok=True)
         filename = f"{document.id}-{document.title}.md".replace("/", "-").replace("\\", "-")
         path = project_dir / filename
-        path.write_text(document.content_md, encoding="utf-8")
+        forward_documents = self._documents_by_ids(document.source_document_ids or [])
+        path.write_text(render_project_document_file(document, forward_documents), encoding="utf-8")
         return str(path)
+
+    def _documents_by_ids(self, document_ids: list[int]) -> list[ProjectDocument]:
+        if not document_ids:
+            return []
+        return list(
+            self.session.exec(
+                select(ProjectDocument)
+                .where(col(ProjectDocument.id).in_(document_ids))
+                .order_by(ProjectDocument.updated_at.desc(), ProjectDocument.id.desc())
+            ).all()
+        )
+
+
+def render_project_document_file(
+    document: ProjectDocument,
+    forward_documents: list[ProjectDocument],
+) -> str:
+    metadata = {
+        "project_id": str(document.project_id),
+        "document_id": str(document.id or ""),
+        "phase_id": str(document.phase_id or ""),
+        "plan_id": str(document.plan_id or ""),
+        "template_id": str(document.template_id or ""),
+        "status": document.status.value,
+    }
+    lines = ["---", *[f"{key}: {value}" for key, value in metadata.items()], "---", ""]
+    links = [obsidian_link_for_project_document(item) for item in forward_documents]
+    body = render_project_document_link_section(links) + strip_markdown_frontmatter(
+        document.content_md
+    ).strip()
+    return "\n".join(lines) + body.strip() + "\n"
+
+
+def obsidian_link_for_project_document(document: ProjectDocument) -> str:
+    return f"[[{obsidian_note_title_for_project_document(document)}]]"
+
+
+def obsidian_note_title_for_project_document(document: ProjectDocument) -> str:
+    if document.file_path:
+        return Path(document.file_path).stem
+    return f"{document.id or 'draft'}-{sanitize_path_part(document.title)}"
+
+
+def render_project_document_link_section(links: list[str]) -> str:
+    if not links:
+        return ""
+    lines = ["## 关联文件", "", *[f"- {link}" for link in links], ""]
+    return "\n".join(lines) + "\n"
+
+
+def strip_markdown_frontmatter(content_md: str) -> str:
+    if not content_md.startswith("---\n"):
+        return content_md
+    parts = content_md.split("---", 2)
+    if len(parts) < 3:
+        return content_md
+    return parts[2].lstrip()

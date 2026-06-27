@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import date, datetime
 
 from pydantic import BaseModel, Field
@@ -115,6 +117,7 @@ class ProjectDocumentPlanRead(BaseModel):
     sort_order: int
     dependency_codes: list[str]
     dependency_plan_ids: list[int]
+    reference_document_ids: list[int]
 
 
 class DocumentReferencePlanRead(BaseModel):
@@ -127,14 +130,37 @@ class DocumentReferencePlanRead(BaseModel):
     is_periodic: bool
 
 
+class DocumentReferenceDocumentRead(BaseModel):
+    id: int
+    title: str
+    phase_id: int | None
+    phase_name: str | None
+    status: DocumentStatus
+    file_path: str | None
+    updated_at: datetime
+
+
 class DocumentReferencesRead(BaseModel):
     plan: DocumentReferencePlanRead
     references: list[DocumentReferencePlanRead]
     candidates: list[DocumentReferencePlanRead]
+    document_references: list[DocumentReferenceDocumentRead]
+    document_candidates: list[DocumentReferenceDocumentRead]
 
 
 class DocumentReferencesUpdate(BaseModel):
     dependency_plan_ids: list[int] = Field(default_factory=list)
+    reference_document_ids: list[int] = Field(default_factory=list)
+
+
+class MarkdownImportCreate(BaseModel):
+    filename: str
+    content_md: str
+    phase_id: int | None = None
+    import_as_template: bool = True
+    import_as_reference_document: bool = True
+    template_name: str | None = None
+    description: str = ""
 
 
 class GenerateDocumentRequest(BaseModel):
@@ -179,6 +205,11 @@ class DocumentRead(BaseModel):
     source_document_ids: list[int]
     created_at: datetime
     updated_at: datetime
+
+
+class MarkdownImportRead(BaseModel):
+    document: DocumentRead | None
+    catalog_item: CatalogItemRead | None
 
 
 class DocumentVersionRead(BaseModel):

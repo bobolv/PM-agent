@@ -744,6 +744,44 @@ tbody tr:last-child td {
   margin-top: 12px;
 }
 
+.subsection-title {
+  margin: 18px 0 8px;
+}
+
+.import-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.import-panel .primary {
+  width: 100%;
+}
+
+.inline-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.inline-check input {
+  width: auto;
+}
+
+.settings-layout {
+  max-width: 920px;
+}
+
+.settings-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.template-status {
+  margin-top: 12px;
+}
+
 .generation-status {
   margin-bottom: 14px;
 }

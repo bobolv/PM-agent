@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import re
 
 from sqlmodel import Session, select
 
@@ -59,6 +60,7 @@ class TemplateLibraryService:
             return 0
 
         count = 0
+        templates_by_code: dict[str, TemplateFile] = {}
         for path in self.root.rglob("*.md"):
             template = parse_template_file(path)
             code = template.metadata.get("code")
@@ -77,8 +79,12 @@ class TemplateLibraryService:
 
             apply_template_metadata(item, template)
             self.session.add(item)
+            templates_by_code[code] = template
             count += 1
 
+        self.session.flush()
+        if templates_by_code:
+            self._sync_obsidian_links(templates_by_code)
         self.session.commit()
         return count
 
@@ -139,6 +145,8 @@ class TemplateLibraryService:
         return self.root / sanitize_path_part(folder) / filename
 
     def _render_template_file(self, item: DocumentCatalogItem) -> str:
+        items = self.session.exec(select(DocumentCatalogItem)).all()
+        item_by_code = {candidate.code: candidate for candidate in items}
         metadata = {
             "code": item.code,
             "name": item.name,
@@ -152,7 +160,32 @@ class TemplateLibraryService:
             "dependency_codes": ",".join(item.dependency_codes),
         }
         lines = ["---", *[f"{key}: {value}" for key, value in metadata.items()], "---", ""]
-        return "\n".join(lines) + item.outline_md.strip() + "\n"
+        links = [
+            obsidian_link_for_item(item_by_code[code])
+            for code in item.dependency_codes
+            if code in item_by_code
+        ]
+        body = render_obsidian_link_section(links) + strip_obsidian_link_section(item.outline_md)
+        return "\n".join(lines) + body.strip() + "\n"
+
+    def _sync_obsidian_links(self, templates_by_code: dict[str, TemplateFile]) -> None:
+        items = self.session.exec(select(DocumentCatalogItem)).all()
+        item_by_code = {item.code: item for item in items}
+        item_lookup = build_obsidian_item_lookup(items)
+
+        for code, template in templates_by_code.items():
+            item = item_by_code.get(code)
+            if item is None:
+                continue
+
+            link_codes = [
+                dependency_code
+                for dependency_code in resolve_obsidian_link_codes(template.body, item_lookup)
+                if dependency_code != item.code
+            ]
+            if link_codes or has_obsidian_link_section(template.body):
+                item.dependency_codes = link_codes
+                self.session.add(item)
 
 
 def parse_template_file(path: Path) -> TemplateFile:
@@ -178,7 +211,7 @@ def apply_template_metadata(item: DocumentCatalogItem, template: TemplateFile) -
     item.name = metadata.get("name", item.name)
     item.phase_name = blank_to_none(metadata.get("phase_name", item.phase_name))
     item.description = metadata.get("description", item.description)
-    item.outline_md = template.body
+    item.outline_md = strip_obsidian_link_section(template.body)
     item.default_role_type = RoleType(metadata.get("default_role_type", item.default_role_type.value))
     item.is_periodic = parse_bool(metadata.get("is_periodic"), item.is_periodic)
     item.period_type = blank_to_none(metadata.get("period_type", item.period_type))
@@ -199,6 +232,81 @@ def parse_csv(value: str | None) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def obsidian_link_for_item(item: DocumentCatalogItem) -> str:
+    return f"[[{obsidian_note_title_for_item(item)}]]"
+
+
+def obsidian_note_title_for_item(item: DocumentCatalogItem) -> str:
+    if item.template_file_path:
+        return Path(item.template_file_path).stem
+    return f"{item.sort_order:04d}-{sanitize_path_part(item.name)}"
+
+
+def extract_obsidian_link_targets(value: str | None) -> list[str]:
+    if not value:
+        return []
+    targets: list[str] = []
+    for match in re.finditer(r"\[\[([^\]#|]+)(?:#[^\]|]*)?(?:\|[^\]]+)?\]\]", value):
+        target = Path(match.group(1).strip()).stem
+        if target and target not in targets:
+            targets.append(target)
+    return targets
+
+
+def build_obsidian_item_lookup(items: list[DocumentCatalogItem]) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for item in items:
+        keys = {
+            item.code,
+            item.name,
+            obsidian_note_title_for_item(item),
+        }
+        if item.template_file_path:
+            keys.add(Path(item.template_file_path).name)
+        for key in keys:
+            normalized = normalize_obsidian_key(key)
+            if normalized:
+                lookup[normalized] = item.code
+    return lookup
+
+
+def resolve_obsidian_link_codes(value: str | None, lookup: dict[str, str]) -> list[str]:
+    codes: list[str] = []
+    for target in extract_obsidian_link_targets(value):
+        code = lookup.get(normalize_obsidian_key(target))
+        if code and code not in codes:
+            codes.append(code)
+    return codes
+
+
+OBSIDIAN_LINK_SECTION_HEADING = "## 关联文件"
+
+
+def render_obsidian_link_section(links: list[str]) -> str:
+    if not links:
+        return ""
+    lines = [OBSIDIAN_LINK_SECTION_HEADING, "", *[f"- {link}" for link in links], ""]
+    return "\n".join(lines) + "\n"
+
+
+def has_obsidian_link_section(value: str) -> bool:
+    return bool(obsidian_link_section_pattern().search(value))
+
+
+def strip_obsidian_link_section(value: str) -> str:
+    return obsidian_link_section_pattern().sub("", value).strip() + "\n"
+
+
+def obsidian_link_section_pattern() -> re.Pattern[str]:
+    return re.compile(
+        rf"(?ms)^\s*{re.escape(OBSIDIAN_LINK_SECTION_HEADING)}\s*\n.*?(?=^##\s+|\Z)"
+    )
+
+
+def normalize_obsidian_key(value: str) -> str:
+    return Path(value.strip()).stem.lower()
 
 
 def blank_to_none(value: str | None) -> str | None:

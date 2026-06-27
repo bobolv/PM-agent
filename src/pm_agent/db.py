@@ -59,6 +59,7 @@ def _ensure_sqlite_runtime_columns(db_engine: Engine) -> None:
         },
         "projectdocumentplan": {
             "dependency_plan_ids": "JSON",
+            "reference_document_ids": "JSON",
         },
     }
     with db_engine.begin() as connection:
@@ -79,6 +80,13 @@ def _ensure_sqlite_runtime_columns(db_engine: Engine) -> None:
                 "UPDATE projectdocumentplan "
                 "SET dependency_plan_ids = '[]' "
                 "WHERE dependency_plan_ids IS NULL"
+            )
+        )
+        connection.execute(
+            text(
+                "UPDATE projectdocumentplan "
+                "SET reference_document_ids = '[]' "
+                "WHERE reference_document_ids IS NULL"
             )
         )
         _ensure_document_generation_run_template_nullable(connection)

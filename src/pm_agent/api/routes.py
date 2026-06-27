@@ -3,13 +3,16 @@ from sqlmodel import Session, select
 
 from pm_agent.api.schemas import (
     CatalogItemRead,
+    DocumentRead,
+    DocumentReferenceDocumentRead,
     DocumentReferencePlanRead,
     DocumentReferencesRead,
     DocumentReferencesUpdate,
-    DocumentRead,
     DocumentVersionRead,
     GenerateDocumentRequest,
     GenerationPreviewRead,
+    MarkdownImportCreate,
+    MarkdownImportRead,
     PhaseRead,
     ProjectCreate,
     ProjectDocumentPlanRead,
@@ -45,7 +48,12 @@ from pm_agent.models import (
     TaskArtifact,
     WorkRecord,
 )
-from pm_agent.services import CatalogService, DocumentGenerationService, ProjectService
+from pm_agent.services import (
+    CatalogService,
+    DocumentGenerationService,
+    MarkdownImportService,
+    ProjectService,
+)
 from pm_agent.template_library import TemplateLibraryService
 
 router = APIRouter(prefix="/api")
@@ -243,6 +251,22 @@ def _reference_plan_read(
     )
 
 
+def _reference_document_read(
+    document: ProjectDocument,
+    phase_by_id: dict[int, LifecyclePhase],
+) -> DocumentReferenceDocumentRead:
+    phase = phase_by_id.get(document.phase_id or 0)
+    return DocumentReferenceDocumentRead(
+        id=document.id or 0,
+        title=document.title,
+        phase_id=document.phase_id,
+        phase_name=phase.name if phase else None,
+        status=document.status,
+        file_path=document.file_path,
+        updated_at=document.updated_at,
+    )
+
+
 @router.get("/document-plans/{plan_id}/references", response_model=DocumentReferencesRead)
 def get_document_plan_references(
     plan_id: int,
@@ -281,10 +305,34 @@ def get_document_plan_references(
     reference_set = set(reference_ids)
     references = [item for item in project_plans if item.id in reference_set]
     candidates = [item for item in project_plans if item.id != plan.id]
+    project_documents = session.exec(
+        select(ProjectDocument)
+        .where(ProjectDocument.project_id == plan.project_id)
+        .order_by(ProjectDocument.updated_at.desc(), ProjectDocument.id.desc())
+    ).all()
+    document_reference_ids = _normalize_reference_document_ids(plan, project_documents)
+    if document_reference_ids != (plan.reference_document_ids or []):
+        plan.reference_document_ids = document_reference_ids
+        session.add(plan)
+        session.commit()
+        session.refresh(plan)
+    document_reference_set = set(document_reference_ids)
+    document_references = [item for item in project_documents if item.id in document_reference_set]
+    document_candidates = [
+        item
+        for item in project_documents
+        if item.id not in document_reference_set and item.plan_id != plan.id
+    ]
     return DocumentReferencesRead(
         plan=_reference_plan_read(plan, phase_by_id),
         references=[_reference_plan_read(item, phase_by_id) for item in references],
         candidates=[_reference_plan_read(item, phase_by_id) for item in candidates],
+        document_references=[
+            _reference_document_read(item, phase_by_id) for item in document_references
+        ],
+        document_candidates=[
+            _reference_document_read(item, phase_by_id) for item in document_candidates
+        ],
     )
 
 
@@ -304,9 +352,18 @@ def update_document_plan_references(
         .order_by(ProjectDocumentPlan.is_periodic, ProjectDocumentPlan.sort_order)
     ).all()
     valid_ids = _normalize_reference_plan_ids(plan, project_plans, payload.dependency_plan_ids)
+    project_documents = session.exec(
+        select(ProjectDocument).where(ProjectDocument.project_id == plan.project_id)
+    ).all()
+    valid_document_ids = _normalize_reference_document_ids(
+        plan,
+        project_documents,
+        payload.reference_document_ids,
+    )
     plan_by_id = {item.id: item for item in project_plans if item.id is not None}
     plan.dependency_plan_ids = valid_ids
     plan.dependency_codes = [plan_by_id[item_id].code for item_id in valid_ids if item_id in plan_by_id]
+    plan.reference_document_ids = valid_document_ids
     session.add(plan)
     session.commit()
     session.refresh(plan)
@@ -329,10 +386,52 @@ def _normalize_reference_plan_ids(
     return normalized
 
 
+def _normalize_reference_document_ids(
+    plan: ProjectDocumentPlan,
+    project_documents: list[ProjectDocument],
+    requested_ids: list[int | None] | None = None,
+) -> list[int]:
+    valid_ids = {
+        item.id
+        for item in project_documents
+        if item.id is not None and item.plan_id != plan.id
+    }
+    normalized: list[int] = []
+    source_ids = requested_ids if requested_ids is not None else (plan.reference_document_ids or [])
+    for requested_id in source_ids:
+        if requested_id in valid_ids and requested_id not in normalized:
+            normalized.append(int(requested_id))
+    return normalized
+
+
 def _normalize_plan_reference_fields(plans: list[ProjectDocumentPlan]) -> None:
     for plan in plans:
         plan.dependency_plan_ids = plan.dependency_plan_ids or []
         plan.dependency_codes = plan.dependency_codes or []
+        plan.reference_document_ids = plan.reference_document_ids or []
+
+
+@router.post("/projects/{project_id}/imports/md", response_model=MarkdownImportRead)
+def import_project_markdown(
+    project_id: int,
+    payload: MarkdownImportCreate,
+    session: Session = Depends(get_session),
+) -> MarkdownImportRead:
+    settings = get_settings()
+    try:
+        result = MarkdownImportService(session, settings).import_markdown(
+            project_id=project_id,
+            filename=payload.filename,
+            content_md=payload.content_md,
+            phase_id=payload.phase_id,
+            import_as_template=payload.import_as_template,
+            import_as_reference_document=payload.import_as_reference_document,
+            template_name=payload.template_name,
+            description=payload.description,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return MarkdownImportRead(document=result.document, catalog_item=result.catalog_item)
 
 
 @router.post("/templates", response_model=TemplateRead)

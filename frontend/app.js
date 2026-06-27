@@ -72,6 +72,7 @@ function showPage(page) {
   byId(`${page}Page`).classList.add("active");
   byId("navProjects").classList.toggle("active", page === "projects");
   byId("navNewProject").classList.toggle("active", page === "wizard");
+  byId("navSettings")?.classList.toggle("active", page === "settings");
   renderHeader();
   window.scrollTo(0, 0);
 }
@@ -84,6 +85,7 @@ function renderHeader() {
     phaseDetail: [state.selectedPhase?.name || "阶段详情", "查看当前阶段启用的文档清单。"],
     reference: [state.selectedPlan?.title || "引用关系管理", "管理生成前导入上下文的前序文档。"],
     preview: [state.selectedPlan?.title || "文档生成预览", "生成前检查 Prompt、引用文档和上下文材料。"],
+    settings: ["全局设置", "管理模板库导出、批量导入和 Obsidian 互通。"],
   };
   const [title, subtitle] = titles[state.page] || titles.projects;
   byId("pageTitle").textContent = title;
@@ -137,6 +139,7 @@ function ensureReferencePage() {
     showPage(state.selectedPlan?.is_periodic ? "projectDetail" : "phaseDetail");
   });
   bindClick("addReference", addReference);
+  bindClick("addDocumentReference", addDocumentReference);
 }
 
 async function bootstrap() {
@@ -523,6 +526,126 @@ function renderRecentDocuments() {
 
 function renderProjectSettings() {
   byId("deleteCurrentProject").onclick = () => deleteProject(state.project.id);
+  const phaseSelect = byId("importMdPhase");
+  if (phaseSelect) {
+    phaseSelect.innerHTML = state.phases
+      .map((phase) => `<option value="${phase.id}">${escapeHtml(phase.name)}</option>`)
+      .join("");
+  }
+  bindClick("importMdSubmit", importMarkdownDocument);
+}
+
+async function runTemplateLibraryAction(action, buttonId) {
+  const button = byId(buttonId);
+  const previousText = button?.textContent || "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "处理中";
+  }
+  try {
+    const result = await action();
+    await loadCatalog();
+    renderWizardCatalog();
+    renderTemplateLibraryStatus(result);
+  } catch (error) {
+    showToast(`模板库操作失败：${error.message}`, "error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = previousText;
+    }
+  }
+}
+
+function renderTemplateLibraryStatus(result) {
+  const target = byId("templateLibraryStatus");
+  if (!target) return;
+  const paths = result.paths || [];
+  const countText = [
+    result.exported !== undefined ? `导出 ${result.exported} 个文件` : "",
+    result.synced !== undefined ? `同步 ${result.synced} 个模板` : "",
+    result.reset !== undefined ? `重置 ${result.reset} 个内置模板` : "",
+  ]
+    .filter(Boolean)
+    .join("，");
+  target.innerHTML = `
+    <strong>${escapeHtml(countText || "操作完成")}</strong>
+    <span>${paths.length ? `最近文件：${escapeHtml(paths.slice(0, 3).join("；"))}` : "模板目录已处理完成。"}</span>
+  `;
+  showToast(countText || "模板库操作完成。", "success");
+}
+
+function bindTemplateLibrarySettings() {
+  bindClick("exportTemplates", () =>
+    runTemplateLibraryAction(
+      () => request("/api/document-catalog/export-md", { method: "POST" }),
+      "exportTemplates",
+    ),
+  );
+  bindClick("exportTemplatesOverwrite", () =>
+    runTemplateLibraryAction(
+      () => request("/api/document-catalog/export-md?overwrite=true", { method: "POST" }),
+      "exportTemplatesOverwrite",
+    ),
+  );
+  bindClick("syncTemplates", () =>
+    runTemplateLibraryAction(
+      () => request("/api/document-catalog/sync-md", { method: "POST" }),
+      "syncTemplates",
+    ),
+  );
+  bindClick("resetBuiltinTemplates", () => {
+    if (!confirm("将用内置目录重置模板元数据并覆盖导出 Markdown，确认继续？")) return;
+    runTemplateLibraryAction(
+      () => request("/api/document-catalog/reset-builtin-md", { method: "POST" }),
+      "resetBuiltinTemplates",
+    );
+  });
+}
+
+async function importMarkdownDocument() {
+  if (!state.project) return;
+  const fileInput = byId("importMdFile");
+  const file = fileInput?.files?.[0];
+  if (!file) {
+    showToast("请选择一个 Markdown 文件。", "error");
+    return;
+  }
+  const importAsDocument = byId("importAsDocument")?.checked ?? true;
+  const importAsTemplate = byId("importAsTemplate")?.checked ?? true;
+  if (!importAsDocument && !importAsTemplate) {
+    showToast("请至少选择一种导入用途。", "error");
+    return;
+  }
+
+  const button = byId("importMdSubmit");
+  const previousText = button.textContent;
+  button.disabled = true;
+  button.textContent = "正在导入";
+  try {
+    const content = await file.text();
+    await request(`/api/projects/${state.project.id}/imports/md`, {
+      method: "POST",
+      body: JSON.stringify({
+        filename: file.name,
+        content_md: content,
+        phase_id: Number(byId("importMdPhase").value) || null,
+        template_name: value("importMdName") || null,
+        import_as_template: importAsTemplate,
+        import_as_reference_document: importAsDocument,
+      }),
+    });
+    byId("importMdName").value = "";
+    fileInput.value = "";
+    await loadCatalog();
+    await openProject(state.project.id);
+    showToast("MD 文档已导入，模板提纲和关联文件已更新。", "success");
+  } catch (error) {
+    showToast(`导入失败：${error.message}`, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText || "导入文档";
+  }
 }
 
 function openPhase(phaseId) {
@@ -637,6 +760,11 @@ function renderReferenceManager() {
   const references = state.references.references || [];
   const referenceIds = new Set(references.map((item) => item.id));
   const candidates = (state.references.candidates || []).filter((item) => !referenceIds.has(item.id));
+  const documentReferences = state.references.document_references || [];
+  const documentReferenceIds = new Set(documentReferences.map((item) => item.id));
+  const documentCandidates = (state.references.document_candidates || []).filter(
+    (item) => !documentReferenceIds.has(item.id),
+  );
   if (!byId("referenceTargetTitle") || !byId("referenceList")) {
     showToast("引用关系页面结构加载失败，请刷新页面后重试。", "error");
     return;
@@ -646,12 +774,28 @@ function renderReferenceManager() {
   byId("referenceList").innerHTML = references.length
     ? references.map(renderReferenceItem).join("")
     : `<div class="empty-note">暂无显式引用。生成时会根据阶段回退策略选择前序文档。</div>`;
+  if (byId("referenceDocumentList")) {
+    byId("referenceDocumentList").innerHTML = documentReferences.length
+      ? documentReferences.map(renderDocumentReferenceItem).join("")
+      : `<div class="empty-note">暂无已导入的关联文件。</div>`;
+  }
   byId("referenceCandidateSelect").innerHTML = candidates.length
     ? candidates.map((item) => `<option value="${item.id}">${escapeHtml(item.title)} · ${escapeHtml(planPhaseText(item))}</option>`).join("")
     : `<option value="">暂无可添加文档</option>`;
   byId("addReference").disabled = !candidates.length;
+  if (byId("referenceDocumentCandidateSelect")) {
+    byId("referenceDocumentCandidateSelect").innerHTML = documentCandidates.length
+      ? documentCandidates
+          .map((item) => `<option value="${item.id}">${escapeHtml(item.title)} · ${escapeHtml(item.phase_name || "未设置阶段")}</option>`)
+          .join("")
+      : `<option value="">暂无可添加关联文件</option>`;
+    byId("addDocumentReference").disabled = !documentCandidates.length;
+  }
   byId("referenceList").querySelectorAll("[data-remove-reference]").forEach((button) => {
     button.onclick = () => removeReference(Number(button.dataset.removeReference));
+  });
+  byId("referenceDocumentList")?.querySelectorAll("[data-remove-document-reference]").forEach((button) => {
+    button.onclick = () => removeDocumentReference(Number(button.dataset.removeDocumentReference));
   });
 }
 
@@ -667,6 +811,18 @@ function renderReferenceItem(item) {
   `;
 }
 
+function renderDocumentReferenceItem(item) {
+  return `
+    <div class="reference-item">
+      <div>
+        <strong>${escapeHtml(item.title)}</strong>
+        <span>${escapeHtml(item.phase_name || "未设置阶段")} · ${statusLabel(item.status)}</span>
+      </div>
+      <button class="secondary compact-button" type="button" data-remove-document-reference="${item.id}">移除</button>
+    </div>
+  `;
+}
+
 function planPhaseText(plan) {
   return plan.is_periodic ? "周期文档" : plan.phase_name || "未设置阶段";
 }
@@ -675,26 +831,44 @@ async function addReference() {
   const selectedId = Number(byId("referenceCandidateSelect").value);
   if (!selectedId) return;
   const ids = [...(state.references.references || []).map((item) => item.id), selectedId];
-  await saveReferences(ids);
+  await saveReferences(ids, (state.references.document_references || []).map((item) => item.id));
 }
 
 async function removeReference(referenceId) {
   const ids = (state.references.references || [])
     .map((item) => item.id)
     .filter((id) => id !== referenceId);
-  await saveReferences(ids);
+  await saveReferences(ids, (state.references.document_references || []).map((item) => item.id));
 }
 
-async function saveReferences(referenceIds) {
+async function addDocumentReference() {
+  const selectedId = Number(byId("referenceDocumentCandidateSelect")?.value);
+  if (!selectedId) return;
+  const ids = [...(state.references.document_references || []).map((item) => item.id), selectedId];
+  await saveReferences((state.references.references || []).map((item) => item.id), ids);
+}
+
+async function removeDocumentReference(referenceId) {
+  const ids = (state.references.document_references || [])
+    .map((item) => item.id)
+    .filter((id) => id !== referenceId);
+  await saveReferences((state.references.references || []).map((item) => item.id), ids);
+}
+
+async function saveReferences(referenceIds, documentReferenceIds) {
   const result = await request(`/api/document-plans/${state.selectedPlan.id}/references`, {
     method: "PUT",
-    body: JSON.stringify({ dependency_plan_ids: referenceIds }),
+    body: JSON.stringify({
+      dependency_plan_ids: referenceIds,
+      reference_document_ids: documentReferenceIds,
+    }),
   });
   state.references = result;
   const localPlan = state.documentPlans.find((plan) => plan.id === state.selectedPlan.id);
   if (localPlan) {
     localPlan.dependency_plan_ids = result.references.map((item) => item.id);
     localPlan.dependency_codes = result.references.map((item) => item.code);
+    localPlan.reference_document_ids = result.document_references.map((item) => item.id);
     state.selectedPlan = localPlan;
   }
   renderReferenceManager();
@@ -827,6 +1001,7 @@ function statusLabel(status) {
 
 bindClick("navProjects", () => showPage("projects"));
 bindClick("navNewProject", openWizard);
+bindClick("navSettings", () => showPage("settings"));
 bindClick("backToProjects", () => showPage("projects"));
 bindClick("backToProjectDetail", () => showPage("projectDetail"));
 bindClick("backFromReference", () => {
@@ -837,6 +1012,8 @@ bindClick("backToPhaseDetail", () => {
 });
 bindClick("generateFromPreview", generateFromPreview);
 bindClick("addReference", addReference);
+bindClick("addDocumentReference", addDocumentReference);
+bindTemplateLibrarySettings();
 
 document.querySelectorAll(".step").forEach((button) => {
   button.onclick = () => {
